@@ -1,6 +1,7 @@
 use chrono::{DateTime, NaiveDateTime, Utc};
 
 use clap::{App, Arg, SubCommand};
+use multimap::MultiMap;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -55,7 +56,7 @@ struct Reaction {
 }
 #[derive(Serialize, Deserialize, Clone)]
 struct Share {
-    link: String,
+    link: Option<String>,
 }
 #[derive(Serialize, Deserialize, Clone)]
 struct Sticker {
@@ -259,10 +260,9 @@ fn main() {
                 .value_of("input")
                 .unwrap();
 
-            let all_conversations: HashMap<String, usize> = get_all_conversations(&fb_file);
-            let mut all_conversations: Vec<(String, usize)> =
+            let all_conversations: MultiMap<String, usize> = get_all_conversations(&fb_file);
+            let mut all_conversations: Vec<(String, Vec<usize>)> =
                 all_conversations.into_iter().collect();
-            all_conversations.sort_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap());
             let all_conversations: Vec<String> = all_conversations
                 .iter()
                 .map(|(name, _)| name.clone())
@@ -284,13 +284,18 @@ fn main() {
                 .unwrap()
                 .value_of("name")
                 .unwrap();
-            let all_conversations: HashMap<String, usize> = get_all_conversations(&fb_file);
-            let conversation_idx = all_conversations[name];
+            let all_conversations: MultiMap<String, usize> = get_all_conversations(&fb_file);
+            let conversation_idx: &Vec<usize> = all_conversations.get_vec(name).unwrap();
             let zip_file = File::open(fb_file).unwrap();
             let mut zip = zip::ZipArchive::new(zip_file).unwrap();
-            let messages = parse_messages(zip.by_index(conversation_idx).unwrap());
+            let mut all_messages = Vec::new();
+            for &idx in conversation_idx {
+                let (title, participants, mut messages) =
+                    parse_messages(zip.by_index(idx).unwrap()).unwrap();
+                all_messages.append(&mut messages);
+            }
 
-            println!("{:?}", messages);
+            println!("{:?}", all_messages);
         }
         e => {
             println!("Invalid option {:?}!", e);
