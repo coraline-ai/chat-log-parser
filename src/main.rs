@@ -1,18 +1,21 @@
-use chrono::{DateTime, NaiveDateTime, Utc};
-
+use chrono::{DateTime, Datelike, Duration, NaiveDateTime, Utc};
 use clap::{App, Arg, SubCommand};
 use multimap::MultiMap;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs::File;
-use std::io::Read;
+use std::fs::OpenOptions;
+use std::io::{Read, Write};
 use std::path::Path;
 
 use mimalloc::MiMalloc;
 
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
+
+// AFK for more than 10 minutes means new conversation
+const CONVERSATION_TIMEOUT: i64 = 10 * 60;
 
 #[derive(Debug, Clone)]
 struct Message {
@@ -26,7 +29,7 @@ trait HasURI {
     fn header<'a>(self: &'a Self) -> &'static str;
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct Participant {
     name: String,
 }
@@ -128,11 +131,9 @@ fn get_uris<T: HasURI>(input: &Vec<T>) -> String {
     )
 }
 
-fn get_names(zip_path: &str) -> std::io::Result<HashMap<String, usize>> {
-    let zip_file = File::open(zip_path)?;
-
-    let mut zip = zip::ZipArchive::new(zip_file)?;
-
+fn get_names(
+    zip: &mut zip::read::ZipArchive<std::fs::File>,
+) -> std::io::Result<HashMap<String, usize>> {
     Ok((0..zip.len())
         .map(|i| {
             let file = zip.by_index(i).unwrap();
@@ -153,11 +154,45 @@ fn get_names(zip_path: &str) -> std::io::Result<HashMap<String, usize>> {
 }
 
 fn parse_messages(
-    mut file: zip::read::ZipFile,
+    file: &mut zip::read::ZipFile,
 ) -> serde_json::Result<(String, Vec<Participant>, Vec<Message>)> {
-    let mut str_repr = String::new();
-    file.read_to_string(&mut str_repr).unwrap();
-    let file: serde_json::Value = simd_json::from_str(&mut str_repr).unwrap();
+    let mut u8_repr = Vec::new();
+    file.read_to_end(&mut u8_repr).unwrap();
+
+    // facebook doesn't do encode unicode in JSON correctly -- they
+    // use \u{UTF-8 sequence here} instead of just embedding the unicode
+    // sequence or using a UTF codepoint. forgive me for this awful fsm
+
+    let mut no_awful_unicode = Vec::with_capacity(u8_repr.len());
+    let mut a = 0;
+    while a < u8_repr.len() {
+        let mut cond = u8_repr[a] == b'\\' && u8_repr[a + 1] == b'u';
+        if !cond {
+            no_awful_unicode.push(char::from(u8_repr[a]));
+            a += 1;
+        } else {
+            let mut char_buf = Vec::new();
+            while cond {
+                let u8_buf = vec![
+                    u8_repr[a + 2],
+                    u8_repr[a + 3],
+                    u8_repr[a + 4],
+                    u8_repr[a + 5],
+                ];
+                let u8_buf: String = u8_buf.into_iter().map(|v| v as char).collect();
+                let u8_elem: u8 = u8::from_str_radix(&u8_buf, 16).unwrap();
+                char_buf.push(u8_elem);
+                a += 6;
+                cond = u8_repr[a] == b'\\' && u8_repr[a + 1] == b'u';
+            }
+
+            let mut c_buf: Vec<char> = String::from_utf8(char_buf).unwrap().chars().collect();
+            no_awful_unicode.append(&mut c_buf);
+        }
+    }
+    let mut no_awful_unicode: String = no_awful_unicode.into_iter().collect();
+
+    let file: serde_json::Value = simd_json::from_str(&mut no_awful_unicode).unwrap();
     let title: String = serde_json::from_value(file["title"].clone()).unwrap();
 
     let participants: Vec<Participant> = serde_json::from_value(file["participants"].clone())?;
@@ -166,7 +201,13 @@ fn parse_messages(
         .iter()
         .map(|v: &RawMessage| Message {
             author: v.sender_name.clone(),
-            timestamp: DateTime::from_utc(NaiveDateTime::from_timestamp(v.timestamp_ms, 0), Utc),
+            timestamp: DateTime::from_utc(
+                NaiveDateTime::from_timestamp(
+                    v.timestamp_ms / 1000,
+                    (v.timestamp_ms % 1000) as u32 * 1000,
+                ),
+                Utc,
+            ),
             content: match &v.content {
                 Some(content) => content.clone(),
                 None => {
@@ -192,8 +233,44 @@ fn parse_messages(
     Ok((title, participants, messages))
 }
 
+fn format_conversation(conversation: &Vec<Message>, eom: &str, eoc: &str) -> String {
+    let mut all_message_strs: Vec<String> = Vec::new();
+    let mut current_conversation_strs: Vec<String> = Vec::new();
+    let mut conversation_timestamp: DateTime<Utc> = conversation[0].timestamp;
+    let mut last_timestamp: DateTime<Utc> = conversation[0].timestamp;
+
+    for message in conversation {
+        let diff: Duration = message.timestamp.signed_duration_since(last_timestamp);
+        if diff.num_seconds() > CONVERSATION_TIMEOUT {
+            conversation_timestamp = message.timestamp;
+            all_message_strs.push(current_conversation_strs.join(eom));
+            current_conversation_strs.clear();
+        }
+        let diff: Duration = message
+            .timestamp
+            .signed_duration_since(conversation_timestamp);
+
+        let formatted_msg = format!(
+            "|{} {} +{} - {}|: {}\n",
+            conversation_timestamp.month(),
+            conversation_timestamp.year(),
+            diff.num_seconds(),
+            message.author,
+            message.content
+        );
+
+        current_conversation_strs.push(formatted_msg);
+
+        last_timestamp = message.timestamp;
+    }
+
+    return all_message_strs.join(eoc);
+}
+
 fn main() {
-    let matches = App::new("Coraline Dataset Generator")
+    // this is kind of gross and doesn't work well,
+    // refactor later
+    let matches = App::new("Facebook Messenger Chatbot Dataset Generator")
         .version("0.1")
         .author("Srinvas Kaza <kazasrinivas3@gmail.com>")
         .about(
@@ -225,12 +302,20 @@ fn main() {
                         .value_name("FILE")
                         .required(true)
                         .takes_value(true),
+                )
+                .arg(
+                    Arg::with_name("output")
+                        .long("output")
+                        .short("-o")
+                        .value_name("FILE")
+                        .required(true)
+                        .takes_value(true),
                 ),
         )
         .get_matches();
 
-    let get_all_conversations = |fb_file| {
-        get_names(fb_file)
+    let get_all_conversations = |zip| {
+        get_names(zip)
             .unwrap()
             .iter()
             .filter(|(name, _)| Path::new(&name).components().count() == 4)
@@ -260,8 +345,11 @@ fn main() {
                 .value_of("input")
                 .unwrap();
 
-            let all_conversations: MultiMap<String, usize> = get_all_conversations(&fb_file);
-            let mut all_conversations: Vec<(String, Vec<usize>)> =
+            let zip_file = File::open(fb_file).unwrap();
+            let mut zip = zip::ZipArchive::new(zip_file).unwrap();
+
+            let all_conversations: MultiMap<String, usize> = get_all_conversations(&mut zip);
+            let all_conversations: Vec<(String, Vec<usize>)> =
                 all_conversations.into_iter().collect();
             let all_conversations: Vec<String> = all_conversations
                 .iter()
@@ -284,18 +372,62 @@ fn main() {
                 .unwrap()
                 .value_of("name")
                 .unwrap();
-            let all_conversations: MultiMap<String, usize> = get_all_conversations(&fb_file);
-            let conversation_idx: &Vec<usize> = all_conversations.get_vec(name).unwrap();
+            let output_file_name = matches
+                .subcommand_matches("generate")
+                .unwrap()
+                .value_of("output")
+                .unwrap();
             let zip_file = File::open(fb_file).unwrap();
             let mut zip = zip::ZipArchive::new(zip_file).unwrap();
+
+            let all_conversations: MultiMap<String, usize> = get_all_conversations(&mut zip);
+            let conversation_idx: &Vec<usize> = all_conversations.get_vec(name).unwrap();
+
             let mut all_messages = Vec::new();
-            for &idx in conversation_idx {
-                let (title, participants, mut messages) =
-                    parse_messages(zip.by_index(idx).unwrap()).unwrap();
+            let mut title = None;
+            let mut prev_participants = None;
+            for (i, &idx) in conversation_idx.iter().enumerate() {
+                let mut zip_file = zip.by_index(idx).unwrap();
+                let (_title, _participants, mut messages) = parse_messages(&mut zip_file).unwrap();
+                match prev_participants {
+                    Some(prev_participants) => {
+                        assert!(prev_participants == _participants);
+                    }
+                    None => {}
+                };
+                prev_participants = Some(_participants);
+                title = Some(_title);
+                println!(
+                    "Parsed {} messages from compressed json file {} -- {:.2} MB",
+                    &messages.len(),
+                    i,
+                    (zip_file.size() as f64) / (1 << 20) as f64
+                );
                 all_messages.append(&mut messages);
             }
+            all_messages.sort_by_key(|a| a.timestamp);
+            println!("Sorted {} messages by timestamp", all_messages.len());
 
-            println!("{:?}", all_messages);
+            println!(
+                "\n\nConversation title: {}\nParticipants: {:?}",
+                title.unwrap(),
+                prev_participants
+                    .unwrap()
+                    .iter()
+                    .map(|p| p.name.clone())
+                    .collect::<Vec<String>>()
+            );
+
+            let mut output_file = OpenOptions::new()
+                .write(true)
+                .create(true)
+                .open(output_file_name)
+                .unwrap();
+            let formatted_messages =
+                format_conversation(&all_messages, "<|endofmessage|>", "<|endoftext|>");
+            output_file.write(formatted_messages.as_bytes()).unwrap();
+
+            //println!("{:?}", all_messages);
         }
         e => {
             println!("Invalid option {:?}!", e);
