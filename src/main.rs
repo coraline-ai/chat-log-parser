@@ -1,10 +1,12 @@
 use chrono::{DateTime, Datelike, Duration, NaiveDateTime, Utc};
 use clap::{App, Arg, SubCommand};
 use multimap::MultiMap;
+use rand::{Rng, SeedableRng};
+use rand_pcg::Pcg64Mcg;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::ffi::OsStr;
-use std::fs::{File, remove_file};
+use std::fs::{remove_file, File};
 use std::io::{Read, Write};
 use std::path::Path;
 
@@ -15,6 +17,8 @@ static GLOBAL: MiMalloc = MiMalloc;
 
 // AFK for more than 10 minutes means new conversation
 const CONVERSATION_TIMEOUT: i64 = 10 * 60;
+
+const TRAIN_TEST_TIMEOUT: i64 = 1;
 
 #[derive(Debug, Clone)]
 struct Message {
@@ -239,6 +243,43 @@ fn parse_messages(
     Ok((title, participants, messages))
 }
 
+fn train_test(
+    conversation: Vec<Message>,
+    ratio: f32,
+    rng: &mut Pcg64Mcg,
+) -> (Vec<Message>, Vec<Message>) {
+    let mut train_msgs: Vec<Message> = Vec::new();
+    let mut test_msgs: Vec<Message> = Vec::new();
+    let mut is_train: bool = true;
+    let mut conversation_timestamp: DateTime<Utc> = conversation[0].timestamp;
+    let mut last_timestamp: DateTime<Utc> = conversation[0].timestamp;
+
+    for message in conversation {
+        let last_diff: Duration = message.timestamp.signed_duration_since(last_timestamp);
+        let convo_diff: Duration = message
+            .timestamp
+            .signed_duration_since(conversation_timestamp);
+
+        // If it's been a while, consider moving a conversation
+        // to the other set
+        if last_diff.num_seconds() > CONVERSATION_TIMEOUT
+            && convo_diff.num_days() > TRAIN_TEST_TIMEOUT
+        {
+            is_train = rng.gen::<f32>() > ratio;
+            conversation_timestamp = message.timestamp;
+        }
+        last_timestamp = message.timestamp;
+
+        if is_train {
+            train_msgs.push(message);
+        } else {
+            test_msgs.push(message);
+        }
+    }
+
+    (train_msgs, test_msgs)
+}
+
 fn format_conversation(conversation: &Vec<Message>, eom: &str, eoc: &str) -> String {
     let mut all_message_strs: Vec<String> = Vec::new();
     let mut current_conversation_strs: Vec<String> = Vec::new();
@@ -310,9 +351,25 @@ fn main() {
                         .takes_value(true),
                 )
                 .arg(
+                    Arg::with_name("test")
+                        .long("test")
+                        .short("t")
+                        .value_name("test ratio")
+                        .required(false)
+                        .takes_value(true),
+                )
+                .arg(
+                    Arg::with_name("seed")
+                        .long("seed")
+                        .short("s")
+                        .value_name("RNG seed")
+                        .required(false)
+                        .takes_value(true),
+                )
+                .arg(
                     Arg::with_name("output")
                         .long("output")
-                        .short("-o")
+                        .short("o")
                         .value_name("FILE")
                         .required(true)
                         .takes_value(true),
@@ -367,32 +424,31 @@ fn main() {
             }
         }
         Some("generate") => {
-            // refactor this later
-            let fb_file = matches
-                .subcommand_matches("generate")
-                .unwrap()
-                .value_of("input")
-                .unwrap();
-            let name = matches
-                .subcommand_matches("generate")
-                .unwrap()
-                .value_of("name")
-                .unwrap();
-            let output_file_name = matches
-                .subcommand_matches("generate")
-                .unwrap()
-                .value_of("output")
-                .unwrap();
+            let generate_match = matches.subcommand_matches("generate").unwrap();
+            let (fb_file, name, output_file_name, test_ratio, seed) = (
+                generate_match.value_of("input").unwrap(),
+                generate_match.value_of("name").unwrap(),
+                generate_match.value_of("output").unwrap(),
+                match generate_match.value_of("test") {
+                    None => None,
+                    Some(test_ratio) => Some(test_ratio.parse::<f32>().unwrap()),
+                },
+                match generate_match.value_of("seed") {
+                    None => None,
+                    Some(seed) => Some(seed.parse::<u64>().unwrap()),
+                },
+            );
+            match test_ratio {
+                None => {}
+                Some(test_ratio) => {
+                    assert!(test_ratio < 1.0 && test_ratio > 0.0);
+                }
+            };
             let zip_file = File::open(fb_file).unwrap();
             let mut zip = zip::ZipArchive::new(zip_file).unwrap();
 
             let all_conversations: MultiMap<String, usize> = get_all_conversations(&mut zip);
             let conversation_idx: &Vec<usize> = all_conversations.get_vec(name).unwrap();
-
-            match remove_file(output_file_name) {
-                Ok(_) => {println!("Warning: Overwriting {}", &output_file_name)},
-                Err(_) => {}
-            };
 
             let mut all_messages = Vec::new();
             let mut title = None;
@@ -429,10 +485,49 @@ fn main() {
                     .collect::<Vec<String>>()
             );
 
-            let mut output_file = File::create(output_file_name).unwrap();
-            let formatted_messages =
-                format_conversation(&all_messages, "|EOM|", "<|endoftext|>");
-            output_file.write(formatted_messages.as_bytes()).unwrap();
+            //let mut output_file = File::create(output_file_name).unwrap();
+
+            let write_msgs = |msgs, suffix: Option<&'static str>| {
+                let out_path = Path::new(output_file_name);
+                let output_file_path = match suffix {
+                    None => String::from(output_file_name),
+                    Some(suffix) => format!(
+                        "{}_{}.{}",
+                        out_path.file_stem().and_then(OsStr::to_str).unwrap(),
+                        suffix,
+                        out_path.extension().and_then(OsStr::to_str).unwrap()
+                    ),
+                };
+
+                match remove_file(&output_file_path) {
+                    Ok(_) => println!("Warning: Overwriting {}", &output_file_path),
+                    Err(_) => {}
+                };
+
+                let mut output_file = File::create(output_file_path).unwrap();
+                let formatted_messages = format_conversation(msgs, "|EOM|", "<|endoftext|>");
+                output_file.write(formatted_messages.as_bytes()).unwrap();
+            };
+
+            match test_ratio {
+                None => {
+                    /*let formatted_messages =
+                        format_conversation(&all_messages, "|EOM|", "<|endoftext|>");
+                    output_file.write(formatted_messages.as_bytes()).unwrap();*/
+                    write_msgs(&all_messages, None);
+                }
+                Some(test_ratio) => {
+                    let mut rng = match seed {
+                        Some(seed) => Pcg64Mcg::seed_from_u64(seed),
+                        None => Pcg64Mcg::from_entropy(),
+                    };
+                    let (train_messages, test_messages) =
+                        train_test(all_messages, test_ratio, &mut rng);
+
+                    write_msgs(&train_messages, Some("train"));
+                    write_msgs(&test_messages, Some("test"));
+                }
+            };
 
             //println!("{:?}", all_messages);
         }
