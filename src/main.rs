@@ -4,8 +4,7 @@ use multimap::MultiMap;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::ffi::OsStr;
-use std::fs::File;
-use std::fs::OpenOptions;
+use std::fs::{File, remove_file};
 use std::io::{Read, Write};
 use std::path::Path;
 
@@ -159,20 +158,27 @@ fn parse_messages(
     let mut u8_repr = Vec::new();
     file.read_to_end(&mut u8_repr).unwrap();
 
-    // facebook doesn't do encode unicode in JSON correctly -- they
-    // use \u{UTF-8 sequence here} instead of just embedding the unicode
+    // facebook doesn't encode unicode in JSON correctly -- they use
+    // \u{UTF-8 sequence here} instead of just embedding the unicode
     // sequence or using a UTF codepoint. forgive me for this awful fsm
 
     let mut no_awful_unicode = Vec::with_capacity(u8_repr.len());
     let mut a = 0;
     while a < u8_repr.len() {
+        // detect unicode code point
         let mut cond = u8_repr[a] == b'\\' && u8_repr[a + 1] == b'u';
         if !cond {
+            // if this chunk of text was not intended to represent a
+            // unicode sequence
             no_awful_unicode.push(char::from(u8_repr[a]));
             a += 1;
         } else {
+            // if we've discovered a unicode sequence, parse out each
+            // utf-8 code unit
             let mut char_buf = Vec::new();
             while cond {
+                // single code-unit, represented like \uXXXX,
+                // where XXXX is an 8-bit hex literal
                 let u8_buf = vec![
                     u8_repr[a + 2],
                     u8_repr[a + 3],
@@ -251,7 +257,7 @@ fn format_conversation(conversation: &Vec<Message>, eom: &str, eoc: &str) -> Str
             .signed_duration_since(conversation_timestamp);
 
         let formatted_msg = format!(
-            "|{} {} +{} - {}|: {}\n",
+            "|{} {} {} {}|: {}\n",
             conversation_timestamp.month(),
             conversation_timestamp.year(),
             diff.num_seconds(),
@@ -383,6 +389,11 @@ fn main() {
             let all_conversations: MultiMap<String, usize> = get_all_conversations(&mut zip);
             let conversation_idx: &Vec<usize> = all_conversations.get_vec(name).unwrap();
 
+            match remove_file(output_file_name) {
+                Ok(_) => {println!("Warning: Overwriting {}", &output_file_name)},
+                Err(_) => {}
+            };
+
             let mut all_messages = Vec::new();
             let mut title = None;
             let mut prev_participants = None;
@@ -418,13 +429,9 @@ fn main() {
                     .collect::<Vec<String>>()
             );
 
-            let mut output_file = OpenOptions::new()
-                .write(true)
-                .create(true)
-                .open(output_file_name)
-                .unwrap();
+            let mut output_file = File::create(output_file_name).unwrap();
             let formatted_messages =
-                format_conversation(&all_messages, "<|endofmessage|>", "<|endoftext|>");
+                format_conversation(&all_messages, "|EOM|", "<|endoftext|>");
             output_file.write(formatted_messages.as_bytes()).unwrap();
 
             //println!("{:?}", all_messages);
