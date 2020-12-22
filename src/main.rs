@@ -485,8 +485,6 @@ fn main() {
                     .collect::<Vec<String>>()
             );
 
-            //let mut output_file = File::create(output_file_name).unwrap();
-
             let write_msgs = |msgs, suffix: Option<&'static str>| {
                 let out_path = Path::new(output_file_name);
                 let output_file_path = match suffix {
@@ -511,9 +509,6 @@ fn main() {
 
             match test_ratio {
                 None => {
-                    /*let formatted_messages =
-                        format_conversation(&all_messages, "|EOM|", "<|endoftext|>");
-                    output_file.write(formatted_messages.as_bytes()).unwrap();*/
                     write_msgs(&all_messages, None);
                 }
                 Some(test_ratio) => {
@@ -528,8 +523,6 @@ fn main() {
                     write_msgs(&test_messages, Some("test"));
                 }
             };
-
-            //println!("{:?}", all_messages);
         }
         e => {
             println!("Invalid option {:?}!", e);
