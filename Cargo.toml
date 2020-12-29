@@ -1,5 +1,5 @@
 [package]
-name = "coraline_facebook"
+name = "chat_log_parser"
 version = "0.1.0"
 authors = ["Srinivas Kaza <srinivas@kaza.io>"]
 edition = "2018"
