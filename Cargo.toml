@@ -7,6 +7,14 @@ edition = "2018"
 [build]
 rustflags = ["-C", "target-cpu=native"]
 
+[lib]
+name = "chat_log_parser_lib"
+path = "src/lib.rs"
+
+[[bin]]
+name = "chat_log_parser_bin"
+path = "src/main.rs"
+
 [dependencies]
 zip = "0.5.5"
 rand_pcg = {version = "0.2.1"}
