@@ -183,13 +183,13 @@ fn parse_messages(
             while cond {
                 // single code-unit, represented like \uXXXX,
                 // where XXXX is an 8-bit hex literal
-                let u8_buf = vec![
+                let u8_buf = [
                     u8_repr[a + 2],
                     u8_repr[a + 3],
                     u8_repr[a + 4],
                     u8_repr[a + 5],
                 ];
-                let u8_buf: String = u8_buf.into_iter().map(|v| v as char).collect();
+                let u8_buf: &str = std::str::from_utf8(&u8_buf).unwrap();
                 let u8_elem: u8 = u8::from_str_radix(&u8_buf, 16).unwrap();
                 char_buf.push(u8_elem);
                 a += 6;
