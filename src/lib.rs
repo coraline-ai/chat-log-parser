@@ -1,5 +1,6 @@
 use chrono::{DateTime, Datelike, Duration, NaiveDateTime, Utc};
 use rand_pcg::Pcg64Mcg;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::ffi::OsStr;
