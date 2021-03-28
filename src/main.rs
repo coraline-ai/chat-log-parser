@@ -4,47 +4,11 @@ use rand::SeedableRng;
 use rand_pcg::Pcg64Mcg;
 use std::ffi::OsStr;
 use std::fs::{remove_file, File};
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::Path;
 
 use chat_log_parser_lib::*;
-
-fn get_all_conversations(zip: &mut zip::ZipArchive<File>) -> MultiMap<String, usize> {
-    get_names(zip)
-        .unwrap()
-        .iter()
-        .filter(|(name, _)| Path::new(&name).components().count() == 4)
-        .map(|(name, idx)| {
-            (
-                String::from(
-                    Path::new(&name)
-                        .parent()
-                        .unwrap()
-                        .file_name()
-                        .unwrap()
-                        .to_str()
-                        .unwrap(),
-                ),
-                *idx,
-            )
-        })
-        .collect()
-}
-
-fn list(fb_file: &str) -> Vec<String> {
-    let zip_file = File::open(fb_file).unwrap();
-    let mut zip = zip::ZipArchive::new(zip_file).unwrap();
-
-    let all_conversations: MultiMap<String, usize> = get_all_conversations(&mut zip);
-    let all_conversations: Vec<(String, Vec<usize>)> = all_conversations.into_iter().collect();
-    println!("{:?}", all_conversations);
-    let all_conversations: Vec<String> = all_conversations
-        .iter()
-        .map(|(name, _)| name.clone())
-        .collect();
-
-    all_conversations
-}
 
 fn main() {
     // this is kind of gross and doesn't work well,
@@ -148,11 +112,13 @@ fn main() {
 
             let all_conversations: MultiMap<String, usize> = get_all_conversations(&mut zip);
 
+            let mut idx_to_participants: HashMap<usize, Vec<Participant>> = HashMap::new();
+
             let conversation_idx = match name {
                 Some(name) => all_conversations.get_vec(name).unwrap().clone(),
                 None => {
                     let mut convos: Vec<_> =
-                        all_conversations.iter().map(|(name, idx)| *idx).collect();
+                        all_conversations.iter().map(|(_, idx)| *idx).collect();
                     convos.sort();
                     convos.dedup();
                     convos
@@ -161,11 +127,18 @@ fn main() {
 
             let mut title = None;
             let mut prev_participants = None;
-            let mut all_messages: Vec<Message> = Vec::new();
+            let mut all_messages: Vec<TaggedMessage> = Vec::new();
 
             for (i, &idx) in conversation_idx.iter().enumerate() {
                 let mut zip_file = zip.by_index(idx).unwrap();
-                let (_title, _participants, mut messages) = parse_messages(&mut zip_file).unwrap();
+                let (_title, _participants, messages) = parse_messages(&mut zip_file).unwrap();
+
+                if messages.len() == 0 {
+                    continue;
+                }
+
+                idx_to_participants.insert(idx, _participants.clone());
+
                 if name.is_some() {
                     match prev_participants {
                         Some(prev_participants) => {
@@ -174,6 +147,7 @@ fn main() {
                         None => {}
                     };
                 }
+
                 prev_participants = Some(_participants);
                 title = match name {
                     Some(_) => Some(_title),
@@ -185,6 +159,12 @@ fn main() {
                     i,
                     (zip_file.size() as f64) / (1 << 20) as f64
                 );
+
+                let mut messages = messages
+                    .iter()
+                    .map(|m| TaggedMessage::new(m, idx))
+                    .collect::<Vec<_>>();
+
                 all_messages.append(&mut messages);
             }
 
@@ -222,7 +202,7 @@ fn main() {
                 };
 
                 let mut output_file = File::create(output_file_path).unwrap();
-                let formatted_messages = format_conversation(msgs, "|EOM|", "<|endoftext|>");
+                let formatted_messages = format_conversation(&idx_to_participants, msgs, "|EOM|", "<|endoftext|>");
                 output_file.write(formatted_messages.as_bytes()).unwrap();
             };
 

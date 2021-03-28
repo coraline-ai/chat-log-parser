@@ -1,9 +1,11 @@
 use chrono::{DateTime, Datelike, Duration, NaiveDateTime, Utc};
+use multimap::MultiMap;
 use rand::Rng;
 use rand_pcg::Pcg64Mcg;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::ffi::OsStr;
+use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 
@@ -16,6 +18,24 @@ use std::path::Path;
 pub const CONVERSATION_TIMEOUT: i64 = 10 * 60;
 
 pub const TRAIN_TEST_TIMEOUT: i64 = 1;
+
+pub struct TaggedMessage {
+    pub content: String,
+    pub author: String,
+    pub timestamp: DateTime<Utc>,
+    pub conversation_id: usize,
+}
+
+impl TaggedMessage {
+    pub fn new(m: &Message, conversation_id: usize) -> TaggedMessage {
+        TaggedMessage {
+            content: m.content.clone(),
+            author: m.author.clone(),
+            timestamp: m.timestamp,
+            conversation_id: conversation_id,
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct Message {
@@ -167,7 +187,8 @@ fn unfuck_facebook_unicode_escapes(json_data: &[u8]) -> String {
     let mut a = 0;
     while a < json_data.len() {
         // detect unicode code point
-        let mut cond = (json_data[a] == b'\\' && json_data[a + 1] == b'u') && prev_backslashes % 2 == 0;
+        let mut cond =
+            (json_data[a] == b'\\' && json_data[a + 1] == b'u') && prev_backslashes % 2 == 0;
         if !cond {
             if json_data[a] == b'\\' {
                 prev_backslashes += 1;
@@ -221,7 +242,7 @@ pub fn parse_messages(
 
     let mut no_awful_unicode = unfuck_facebook_unicode_escapes(&u8_repr);
 
-    let file: serde_json::Value = match simd_json::from_str(&mut no_awful_unicode) {
+    let file: serde_json::Value = match serde_json::from_str(&mut no_awful_unicode) {
         Ok(file) => file,
         Err(e) => panic!("Failed on {:?} -- {:?}", no_awful_unicode, e),
     };
@@ -229,6 +250,7 @@ pub fn parse_messages(
 
     let participants: Vec<Participant> = serde_json::from_value(file["participants"].clone())?;
     let messages: Vec<RawMessage> = serde_json::from_value(file["messages"].clone())?;
+
     let messages: Vec<Message> = messages
         .iter()
         .map(|v: &RawMessage| Message {
@@ -266,12 +288,12 @@ pub fn parse_messages(
 }
 
 pub fn train_test(
-    conversation: Vec<Message>,
+    conversation: Vec<TaggedMessage>,
     ratio: f32,
     rng: &mut Pcg64Mcg,
-) -> (Vec<Message>, Vec<Message>) {
-    let mut train_msgs: Vec<Message> = Vec::new();
-    let mut test_msgs: Vec<Message> = Vec::new();
+) -> (Vec<TaggedMessage>, Vec<TaggedMessage>) {
+    let mut train_msgs: Vec<_> = Vec::new();
+    let mut test_msgs: Vec<_> = Vec::new();
     let mut is_train: bool = true;
     let mut conversation_timestamp: DateTime<Utc> = conversation[0].timestamp;
     let mut last_timestamp: DateTime<Utc> = conversation[0].timestamp;
@@ -302,18 +324,44 @@ pub fn train_test(
     (train_msgs, test_msgs)
 }
 
-pub fn format_conversation(conversation: &Vec<Message>, eom: &str, eoc: &str) -> String {
+pub fn format_conversation(
+    idx_to_participants: &HashMap<usize, Vec<Participant>>,
+    conversation: &Vec<TaggedMessage>,
+    eom: &str,
+    eoc: &str,
+) -> String {
+    if conversation.len() == 0 {
+        return String::new();
+    }
+
     let mut all_message_strs: Vec<String> = Vec::new();
     let mut current_conversation_strs: Vec<String> = Vec::new();
+    let mut current_conversation_id: usize = conversation.first().unwrap().conversation_id;
     let mut conversation_timestamp: DateTime<Utc> = conversation[0].timestamp;
     let mut last_timestamp: DateTime<Utc> = conversation[0].timestamp;
 
     for message in conversation {
         let diff: Duration = message.timestamp.signed_duration_since(last_timestamp);
-        if diff.num_seconds() > CONVERSATION_TIMEOUT {
+        if message.conversation_id != current_conversation_id
+            || diff.num_seconds() > CONVERSATION_TIMEOUT
+        {
             conversation_timestamp = message.timestamp;
+
+            // Add convo header
+            let header = format!(
+                "|{}|\n",
+                idx_to_participants[&current_conversation_id]
+                    .iter()
+                    .map(|p| p.name.clone())
+                    .collect::<Vec<String>>()
+                    .join(" ")
+            );
+            current_conversation_strs.insert(0, header);
+
             all_message_strs.push(current_conversation_strs.join(eom));
             current_conversation_strs.clear();
+
+            current_conversation_id = message.conversation_id;
         }
         let diff: Duration = message
             .timestamp
@@ -336,6 +384,43 @@ pub fn format_conversation(conversation: &Vec<Message>, eom: &str, eoc: &str) ->
     return all_message_strs.join(eoc);
 }
 
+pub fn get_all_conversations(zip: &mut zip::ZipArchive<File>) -> MultiMap<String, usize> {
+    get_names(zip)
+        .unwrap()
+        .iter()
+        .filter(|(name, _)| Path::new(&name).components().count() == 4)
+        .map(|(name, idx)| {
+            (
+                String::from(
+                    Path::new(&name)
+                        .parent()
+                        .unwrap()
+                        .file_name()
+                        .unwrap()
+                        .to_str()
+                        .unwrap(),
+                ),
+                *idx,
+            )
+        })
+        .collect()
+}
+
+pub fn list(fb_file: &str) -> Vec<String> {
+    let zip_file = File::open(fb_file).unwrap();
+    let mut zip = zip::ZipArchive::new(zip_file).unwrap();
+
+    let all_conversations: MultiMap<String, usize> = get_all_conversations(&mut zip);
+    let all_conversations: Vec<(String, Vec<usize>)> = all_conversations.into_iter().collect();
+    println!("{:?}", all_conversations);
+    let all_conversations: Vec<String> = all_conversations
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect();
+
+    all_conversations
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -348,7 +433,10 @@ mod tests {
         let input = b"Rados\\u00c5\\u0082aw";
         assert_eq!(unfuck_facebook_unicode_escapes(input), "Radosław");
         let input = b"No to trzeba ostatnie treningi zrobi\\u00c4\\u0087 xD";
-        assert_eq!(unfuck_facebook_unicode_escapes(input), "No to trzeba ostatnie treningi zrobić xD");
+        assert_eq!(
+            unfuck_facebook_unicode_escapes(input),
+            "No to trzeba ostatnie treningi zrobić xD"
+        );
     }
 
     #[test]
