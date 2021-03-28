@@ -4,10 +4,46 @@ use rand::SeedableRng;
 use rand_pcg::Pcg64Mcg;
 use std::ffi::OsStr;
 use std::fs::{remove_file, File};
-use std::io::Write;
+use std::io::{Write};
 use std::path::Path;
 
 use chat_log_parser_lib::*;
+
+fn get_all_conversations(zip: &mut zip::ZipArchive<File>) -> MultiMap<String, usize> {
+    get_names(zip)
+        .unwrap()
+        .iter()
+        .filter(|(name, _)| Path::new(&name).components().count() == 4)
+        .map(|(name, idx)| {
+            (
+                String::from(
+                    Path::new(&name)
+                        .parent()
+                        .unwrap()
+                        .file_name()
+                        .unwrap()
+                        .to_str()
+                        .unwrap(),
+                ),
+                *idx,
+            )
+        })
+        .collect()
+}
+
+fn list(fb_file: &str) -> Vec<String> {
+    let zip_file = File::open(fb_file).unwrap();
+    let mut zip = zip::ZipArchive::new(zip_file).unwrap();
+
+    let all_conversations: MultiMap<String, usize> = get_all_conversations(&mut zip);
+    let all_conversations: Vec<(String, Vec<usize>)> = all_conversations.into_iter().collect();
+    let all_conversations: Vec<String> = all_conversations
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect();
+
+    all_conversations
+}
 
 fn main() {
     // this is kind of gross and doesn't work well,
@@ -72,28 +108,6 @@ fn main() {
         )
         .get_matches();
 
-    let get_all_conversations = |zip| {
-        get_names(zip)
-            .unwrap()
-            .iter()
-            .filter(|(name, _)| Path::new(&name).components().count() == 4)
-            .map(|(name, idx)| {
-                (
-                    String::from(
-                        Path::new(&name)
-                            .parent()
-                            .unwrap()
-                            .file_name()
-                            .unwrap()
-                            .to_str()
-                            .unwrap(),
-                    ),
-                    *idx,
-                )
-            })
-            .collect()
-    };
-
     match matches.subcommand_name() {
         Some("list") => {
             // refactor this later
@@ -103,18 +117,7 @@ fn main() {
                 .value_of("input")
                 .unwrap();
 
-            let zip_file = File::open(fb_file).unwrap();
-            let mut zip = zip::ZipArchive::new(zip_file).unwrap();
-
-            let all_conversations: MultiMap<String, usize> = get_all_conversations(&mut zip);
-            let all_conversations: Vec<(String, Vec<usize>)> =
-                all_conversations.into_iter().collect();
-            let all_conversations: Vec<String> = all_conversations
-                .iter()
-                .map(|(name, _)| name.clone())
-                .collect();
-
-            for conversation in all_conversations {
+            for conversation in list(fb_file) {
                 println!("{}", conversation);
             }
         }
