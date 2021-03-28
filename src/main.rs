@@ -166,7 +166,6 @@ fn main() {
             for (i, &idx) in conversation_idx.iter().enumerate() {
                 let mut zip_file = zip.by_index(idx).unwrap();
                 let (_title, _participants, mut messages) = parse_messages(&mut zip_file).unwrap();
-                println!("{:?} \n--\n {:?}", prev_participants, _participants);
                 if name.is_some() {
                     match prev_participants {
                         Some(prev_participants) => {
@@ -176,7 +175,10 @@ fn main() {
                     };
                 }
                 prev_participants = Some(_participants);
-                title = Some(_title);
+                title = match name {
+                    Some(_) => Some(_title),
+                    None => Some("".into()),
+                };
                 println!(
                     "Parsed {} messages from compressed json file {} -- {:.2} MB",
                     &messages.len(),
@@ -192,11 +194,14 @@ fn main() {
             println!(
                 "\n\nConversation title: {}\nParticipants: {:?}",
                 title.unwrap(),
-                prev_participants
-                    .unwrap()
-                    .iter()
-                    .map(|p| p.name.clone())
-                    .collect::<Vec<String>>()
+                match name {
+                    Some(_) => prev_participants
+                        .unwrap()
+                        .iter()
+                        .map(|p| p.name.clone())
+                        .collect::<Vec<String>>(),
+                    None => vec!["Many".into()],
+                }
             );
 
             let write_msgs = |msgs, suffix: Option<&'static str>| {
