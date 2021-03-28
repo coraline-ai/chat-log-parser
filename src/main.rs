@@ -129,6 +129,9 @@ fn main() {
             let mut prev_participants = None;
             let mut all_messages: Vec<TaggedMessage> = Vec::new();
 
+            // TODO: Tagged message is probably not the right approach. We need to segment
+            // each conversation into exchanges first, and then insert those by timestamp.
+            // format_conversation will need to be removed
             for (i, &idx) in conversation_idx.iter().enumerate() {
                 let mut zip_file = zip.by_index(idx).unwrap();
                 let (_title, _participants, messages) = parse_messages(&mut zip_file).unwrap();
