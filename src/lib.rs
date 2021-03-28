@@ -7,10 +7,10 @@ use std::ffi::OsStr;
 use std::io::Read;
 use std::path::Path;
 
-use mimalloc::MiMalloc;
+//use mimalloc::MiMalloc;
 
-#[global_allocator]
-static GLOBAL: MiMalloc = MiMalloc;
+//#[global_allocator]
+//static GLOBAL: MiMalloc = MiMalloc;
 
 // AFK for more than 10 minutes means new conversation
 pub const CONVERSATION_TIMEOUT: i64 = 10 * 60;
