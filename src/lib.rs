@@ -153,27 +153,19 @@ pub fn get_names(
         .collect())
 }
 
-// TODO: Create trait for message parsing, and move this into its own
-// impl
-pub fn parse_messages(
-    file: &mut zip::read::ZipFile,
-) -> serde_json::Result<(String, Vec<Participant>, Vec<Message>)> {
-    let mut u8_repr = Vec::new();
-    file.read_to_end(&mut u8_repr).unwrap();
-
+fn unfuck_facebook_unicode_escapes(json_data: &[u8]) -> String {
     // facebook doesn't encode unicode in JSON correctly -- they use
     // \u{UTF-8 sequence here} instead of just embedding the unicode
     // sequence or using a UTF codepoint. forgive me for this awful fsm
-
-    let mut no_awful_unicode = Vec::with_capacity(u8_repr.len());
+    let mut no_awful_unicode = Vec::with_capacity(json_data.len());
     let mut a = 0;
-    while a < u8_repr.len() {
+    while a < json_data.len() {
         // detect unicode code point
-        let mut cond = u8_repr[a] == b'\\' && u8_repr[a + 1] == b'u';
+        let mut cond = json_data[a] == b'\\' && json_data[a + 1] == b'u';
         if !cond {
             // if this chunk of text was not intended to represent a
             // unicode sequence
-            no_awful_unicode.push(char::from(u8_repr[a]));
+            no_awful_unicode.push(char::from(json_data[a]));
             a += 1;
         } else {
             // if we've discovered a unicode sequence, parse out each
@@ -183,23 +175,35 @@ pub fn parse_messages(
                 // single code-unit, represented like \uXXXX,
                 // where XXXX is an 8-bit hex literal
                 let u8_buf = [
-                    u8_repr[a + 2],
-                    u8_repr[a + 3],
-                    u8_repr[a + 4],
-                    u8_repr[a + 5],
+                    json_data[a + 2],
+                    json_data[a + 3],
+                    json_data[a + 4],
+                    json_data[a + 5],
                 ];
                 let u8_buf: &str = std::str::from_utf8(&u8_buf).unwrap();
                 let u8_elem: u8 = u8::from_str_radix(&u8_buf, 16).unwrap();
                 char_buf.push(u8_elem);
                 a += 6;
-                cond = u8_repr[a] == b'\\' && u8_repr[a + 1] == b'u';
+                cond = json_data[a] == b'\\' && json_data[a + 1] == b'u';
             }
 
             let mut c_buf: Vec<char> = String::from_utf8(char_buf).unwrap().chars().collect();
             no_awful_unicode.append(&mut c_buf);
         }
     }
-    let mut no_awful_unicode: String = no_awful_unicode.into_iter().collect();
+    let no_awful_unicode: String = no_awful_unicode.into_iter().collect();
+    no_awful_unicode
+}
+
+// TODO: Create trait for message parsing, and move this into its own
+// impl
+pub fn parse_messages(
+    file: &mut zip::read::ZipFile,
+) -> serde_json::Result<(String, Vec<Participant>, Vec<Message>)> {
+    let mut u8_repr = Vec::new();
+    file.read_to_end(&mut u8_repr).unwrap();
+
+    let mut no_awful_unicode = unfuck_facebook_unicode_escapes(&u8_repr);
 
     let file: serde_json::Value = simd_json::from_str(&mut no_awful_unicode).unwrap();
     let title: String = serde_json::from_value(file["title"].clone()).unwrap();
@@ -311,4 +315,29 @@ pub fn format_conversation(conversation: &Vec<Message>, eom: &str, eoc: &str) ->
     }
 
     return all_message_strs.join(eoc);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn test_unfuck_facebook_unicode_escapes_basic() {
+        let input = b"asdf";
+        assert_eq!(unfuck_facebook_unicode_escapes(input), "asdf");
+        let input = b"\\u0041A";
+        assert_eq!(unfuck_facebook_unicode_escapes(input), "AA");
+        let input = b"Rados\\u00c5\\u0082aw";
+        assert_eq!(unfuck_facebook_unicode_escapes(input), "Radosław");
+        let input = b"No to trzeba ostatnie treningi zrobi\\u00c4\\u0087 xD";
+        assert_eq!(unfuck_facebook_unicode_escapes(input), "No to trzeba ostatnie treningi zrobić xD");
+    }
+
+    #[test]
+    fn test_unfuck_facebook_unicode_escapes_boundaries() {
+        let input = b"\\u0041";
+        assert_eq!(unfuck_facebook_unicode_escapes(input), "A");
+
+        let input = b"\\\\u0041A";
+        assert_eq!(unfuck_facebook_unicode_escapes(input), "\\\\u0041A");
+    }
 }
