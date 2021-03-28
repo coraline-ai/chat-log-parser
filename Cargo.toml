@@ -4,9 +4,6 @@ version = "0.1.0"
 authors = ["Srinivas Kaza <srinivas@kaza.io>"]
 edition = "2018"
 
-[build]
-rustflags = ["-C", "target-cpu=native"]
-
 [lib]
 name = "chat_log_parser_lib"
 path = "src/lib.rs"
