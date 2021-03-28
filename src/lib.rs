@@ -1,6 +1,6 @@
 use chrono::{DateTime, Datelike, Duration, NaiveDateTime, Utc};
-use rand_pcg::Pcg64Mcg;
 use rand::Rng;
+use rand_pcg::Pcg64Mcg;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -157,12 +157,23 @@ fn unfuck_facebook_unicode_escapes(json_data: &[u8]) -> String {
     // facebook doesn't encode unicode in JSON correctly -- they use
     // \u{UTF-8 sequence here} instead of just embedding the unicode
     // sequence or using a UTF codepoint. forgive me for this awful fsm
+
+    // we also have to handle the terrible case of the escaped \u in the
+    // json -- e.g \\urealdatahere. notably this isn't an issue if you have
+    // \\\unicodehere -- that renders as \ unicode here
+    let mut prev_backslashes = 0;
+
     let mut no_awful_unicode = Vec::with_capacity(json_data.len());
     let mut a = 0;
     while a < json_data.len() {
         // detect unicode code point
-        let mut cond = json_data[a] == b'\\' && json_data[a + 1] == b'u';
+        let mut cond = (json_data[a] == b'\\' && json_data[a + 1] == b'u') && prev_backslashes % 2 == 0;
         if !cond {
+            if json_data[a] == b'\\' {
+                prev_backslashes += 1;
+            } else {
+                prev_backslashes = 0;
+            }
             // if this chunk of text was not intended to represent a
             // unicode sequence
             no_awful_unicode.push(char::from(json_data[a]));
@@ -184,11 +195,16 @@ fn unfuck_facebook_unicode_escapes(json_data: &[u8]) -> String {
                 let u8_elem: u8 = u8::from_str_radix(&u8_buf, 16).unwrap();
                 char_buf.push(u8_elem);
                 a += 6;
+
+                if a >= json_data.len() {
+                    break;
+                }
                 cond = json_data[a] == b'\\' && json_data[a + 1] == b'u';
             }
 
             let mut c_buf: Vec<char> = String::from_utf8(char_buf).unwrap().chars().collect();
             no_awful_unicode.append(&mut c_buf);
+            prev_backslashes = 0;
         }
     }
     let no_awful_unicode: String = no_awful_unicode.into_iter().collect();
@@ -205,7 +221,10 @@ pub fn parse_messages(
 
     let mut no_awful_unicode = unfuck_facebook_unicode_escapes(&u8_repr);
 
-    let file: serde_json::Value = simd_json::from_str(&mut no_awful_unicode).unwrap();
+    let file: serde_json::Value = match simd_json::from_str(&mut no_awful_unicode) {
+        Ok(file) => file,
+        Err(e) => panic!("Failed on {:?} -- {:?}", no_awful_unicode, e),
+    };
     let title: String = serde_json::from_value(file["title"].clone()).unwrap();
 
     let participants: Vec<Participant> = serde_json::from_value(file["participants"].clone())?;
