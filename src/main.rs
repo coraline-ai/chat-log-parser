@@ -4,7 +4,7 @@ use rand::SeedableRng;
 use rand_pcg::Pcg64Mcg;
 use std::ffi::OsStr;
 use std::fs::{remove_file, File};
-use std::io::{Write};
+use std::io::Write;
 use std::path::Path;
 
 use chat_log_parser_lib::*;
@@ -37,6 +37,7 @@ fn list(fb_file: &str) -> Vec<String> {
 
     let all_conversations: MultiMap<String, usize> = get_all_conversations(&mut zip);
     let all_conversations: Vec<(String, Vec<usize>)> = all_conversations.into_iter().collect();
+    println!("{:?}", all_conversations);
     let all_conversations: Vec<String> = all_conversations
         .iter()
         .map(|(name, _)| name.clone())
@@ -71,7 +72,7 @@ fn main() {
                 .arg(
                     Arg::with_name("name")
                         .long("name")
-                        .required(true)
+                        .required(false)
                         .short("n")
                         .takes_value(true),
                 )
@@ -125,7 +126,7 @@ fn main() {
             let generate_match = matches.subcommand_matches("generate").unwrap();
             let (fb_file, name, output_file_name, test_ratio, seed) = (
                 generate_match.value_of("input").unwrap(),
-                generate_match.value_of("name").unwrap(),
+                generate_match.value_of("name"),
                 generate_match.value_of("output").unwrap(),
                 match generate_match.value_of("test") {
                     None => None,
@@ -146,20 +147,34 @@ fn main() {
             let mut zip = zip::ZipArchive::new(zip_file).unwrap();
 
             let all_conversations: MultiMap<String, usize> = get_all_conversations(&mut zip);
-            let conversation_idx: &Vec<usize> = all_conversations.get_vec(name).unwrap();
 
-            let mut all_messages = Vec::new();
+            let conversation_idx = match name {
+                Some(name) => all_conversations.get_vec(name).unwrap().clone(),
+                None => {
+                    let mut convos: Vec<_> =
+                        all_conversations.iter().map(|(name, idx)| *idx).collect();
+                    convos.sort();
+                    convos.dedup();
+                    convos
+                }
+            };
+
             let mut title = None;
             let mut prev_participants = None;
+            let mut all_messages: Vec<Message> = Vec::new();
+
             for (i, &idx) in conversation_idx.iter().enumerate() {
                 let mut zip_file = zip.by_index(idx).unwrap();
                 let (_title, _participants, mut messages) = parse_messages(&mut zip_file).unwrap();
-                match prev_participants {
-                    Some(prev_participants) => {
-                        assert!(prev_participants == _participants);
-                    }
-                    None => {}
-                };
+                println!("{:?} \n--\n {:?}", prev_participants, _participants);
+                if name.is_some() {
+                    match prev_participants {
+                        Some(prev_participants) => {
+                            assert!(prev_participants == _participants);
+                        }
+                        None => {}
+                    };
+                }
                 prev_participants = Some(_participants);
                 title = Some(_title);
                 println!(
@@ -170,6 +185,7 @@ fn main() {
                 );
                 all_messages.append(&mut messages);
             }
+
             all_messages.sort_by_key(|a| a.timestamp);
             println!("Sorted {} messages by timestamp", all_messages.len());
 
