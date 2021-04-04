@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs::File;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::Path;
 
 //use mimalloc::MiMalloc;
@@ -18,24 +18,6 @@ use std::path::Path;
 pub const CONVERSATION_TIMEOUT: i64 = 10 * 60;
 
 pub const TRAIN_TEST_TIMEOUT: i64 = 1;
-
-pub struct TaggedMessage {
-    pub content: String,
-    pub author: String,
-    pub timestamp: DateTime<Utc>,
-    pub conversation_id: usize,
-}
-
-impl TaggedMessage {
-    pub fn new(m: &Message, conversation_id: usize) -> TaggedMessage {
-        TaggedMessage {
-            content: m.content.clone(),
-            author: m.author.clone(),
-            timestamp: m.timestamp,
-            conversation_id: conversation_id,
-        }
-    }
-}
 
 #[derive(Debug, Clone)]
 pub struct Message {
@@ -173,6 +155,10 @@ pub fn get_names(
         .collect())
 }
 
+fn is_control_character(c: u8) -> bool {
+    c < 32 || c == 127
+}
+
 fn unfuck_facebook_unicode_escapes(json_data: &[u8]) -> String {
     // facebook doesn't encode unicode in JSON correctly -- they use
     // \u{UTF-8 sequence here} instead of just embedding the unicode
@@ -195,9 +181,17 @@ fn unfuck_facebook_unicode_escapes(json_data: &[u8]) -> String {
             } else {
                 prev_backslashes = 0;
             }
+
+            // first, we don't add the character if it's just a random
+            // control character floating around in the zip --
+            // yes there are some conversations that aren't properly
+            // sanitized by Facebook
+            //
             // if this chunk of text was not intended to represent a
             // unicode sequence
-            no_awful_unicode.push(char::from(json_data[a]));
+            if !is_control_character(json_data[a]) {
+                no_awful_unicode.push(char::from(json_data[a]));
+            }
             a += 1;
         } else {
             // if we've discovered a unicode sequence, parse out each
@@ -212,10 +206,21 @@ fn unfuck_facebook_unicode_escapes(json_data: &[u8]) -> String {
                     json_data[a + 4],
                     json_data[a + 5],
                 ];
+
+                if u8_buf.iter().any(|&c| is_control_character(c)) {
+                    break;
+                }
+
                 let u8_buf: &str = std::str::from_utf8(&u8_buf).unwrap();
                 let u8_elem: u8 = u8::from_str_radix(&u8_buf, 16).unwrap();
-                char_buf.push(u8_elem);
                 a += 6;
+
+                // Again, same check for Unicode control characters here --
+                // I oddly found this with the \u0013 character
+                if is_control_character(u8_elem) {
+                    break;
+                }
+                char_buf.push(u8_elem);
 
                 if a >= json_data.len() {
                     break;
@@ -224,11 +229,13 @@ fn unfuck_facebook_unicode_escapes(json_data: &[u8]) -> String {
             }
 
             let mut c_buf: Vec<char> = String::from_utf8(char_buf).unwrap().chars().collect();
+
             no_awful_unicode.append(&mut c_buf);
             prev_backslashes = 0;
         }
     }
     let no_awful_unicode: String = no_awful_unicode.into_iter().collect();
+
     no_awful_unicode
 }
 
@@ -244,7 +251,11 @@ pub fn parse_messages(
 
     let file: serde_json::Value = match serde_json::from_str(&mut no_awful_unicode) {
         Ok(file) => file,
-        Err(e) => panic!("Failed on {:?} -- {:?}", no_awful_unicode, e),
+        Err(e) => {
+            let mut test_f = File::create("/tmp/coraline_log.json").unwrap();
+            test_f.write_all(no_awful_unicode.as_bytes()).unwrap();
+            panic!("Failed on {:?} -- {:?}", no_awful_unicode, e)
+        }
     };
     let title: String = serde_json::from_value(file["title"].clone()).unwrap();
 
@@ -288,10 +299,10 @@ pub fn parse_messages(
 }
 
 pub fn train_test(
-    conversation: Vec<TaggedMessage>,
+    conversation: &[Message],
     ratio: f32,
     rng: &mut Pcg64Mcg,
-) -> (Vec<TaggedMessage>, Vec<TaggedMessage>) {
+) -> (Vec<Message>, Vec<Message>) {
     let mut train_msgs: Vec<_> = Vec::new();
     let mut test_msgs: Vec<_> = Vec::new();
     let mut is_train: bool = true;
@@ -315,9 +326,9 @@ pub fn train_test(
         last_timestamp = message.timestamp;
 
         if is_train {
-            train_msgs.push(message);
+            train_msgs.push(message.clone());
         } else {
-            test_msgs.push(message);
+            test_msgs.push(message.clone());
         }
     }
 
@@ -325,8 +336,8 @@ pub fn train_test(
 }
 
 pub fn format_conversation(
-    idx_to_participants: &HashMap<usize, Vec<Participant>>,
-    conversation: &Vec<TaggedMessage>,
+    conversation: &[Message],
+    participants: &[Participant],
     eom: &str,
     eoc: &str,
 ) -> String {
@@ -336,32 +347,27 @@ pub fn format_conversation(
 
     let mut all_message_strs: Vec<String> = Vec::new();
     let mut current_conversation_strs: Vec<String> = Vec::new();
-    let mut current_conversation_id: usize = conversation.first().unwrap().conversation_id;
     let mut conversation_timestamp: DateTime<Utc> = conversation[0].timestamp;
     let mut last_timestamp: DateTime<Utc> = conversation[0].timestamp;
 
+    // Let's remind GPT-3 at the start of each conversation
+    let header = format!(
+        "|Participants: {:?}|\n",
+        participants
+            .iter()
+            .map(|p| p.name.clone())
+            .collect::<Vec<String>>()
+            .join(", ")
+    );
+
     for message in conversation {
         let diff: Duration = message.timestamp.signed_duration_since(last_timestamp);
-        if message.conversation_id != current_conversation_id
-            || diff.num_seconds() > CONVERSATION_TIMEOUT
-        {
+        if diff.num_seconds() > CONVERSATION_TIMEOUT {
             conversation_timestamp = message.timestamp;
-
-            // Add convo header
-            let header = format!(
-                "|{}|\n",
-                idx_to_participants[&current_conversation_id]
-                    .iter()
-                    .map(|p| p.name.clone())
-                    .collect::<Vec<String>>()
-                    .join(" ")
-            );
-            current_conversation_strs.insert(0, header);
 
             all_message_strs.push(current_conversation_strs.join(eom));
             current_conversation_strs.clear();
-
-            current_conversation_id = message.conversation_id;
+            current_conversation_strs.push(header.clone());
         }
         let diff: Duration = message
             .timestamp
@@ -446,5 +452,11 @@ mod tests {
 
         let input = b"\\\\u0041A";
         assert_eq!(unfuck_facebook_unicode_escapes(input), "\\\\u0041A");
+    }
+
+    #[test]
+    fn test_unfuck_facebook_control_characters() {
+        let input = b"\\u0013";
+        assert_eq!(unfuck_facebook_unicode_escapes(input), "");
     }
 }
